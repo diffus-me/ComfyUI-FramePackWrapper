@@ -6,6 +6,7 @@ from tqdm import tqdm
 from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 
+import execution_context
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import load_torch_file, ProgressBar, common_upscale
@@ -159,16 +160,19 @@ class DownloadAndLoadFramePackModel:
 
 class FramePackLoraSelect:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(s, context: execution_context.ExecutionContext):
         return {
             "required": {
-               "lora": (folder_paths.get_filename_list("loras"),
+               "lora": (folder_paths.get_filename_list(context, "loras"),
                 {"tooltip": "LORA models are expected to be in ComfyUI/models/loras with .safetensors extension"}),
                 "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.0001, "tooltip": "LORA strength, set to 0.0 to unmerge the LORA"}),
                 "fuse_lora": ("BOOLEAN", {"default": True, "tooltip": "Fuse the LORA model with the base model. This is recommended for better performance."}),
             },
             "optional": {
                 "prev_lora":("FPLORA", {"default": None, "tooltip": "For loading multiple LoRAs"}),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -178,11 +182,11 @@ class FramePackLoraSelect:
     CATEGORY = "FramePackWrapper"
     DESCRIPTION = "Select a LoRA model from ComfyUI/models/loras"
 
-    def getlorapath(self, lora, strength, prev_lora=None, fuse_lora=True):
+    def getlorapath(self, lora, strength, prev_lora=None, fuse_lora=True, context: execution_context.ExecutionContext=None):
         loras_list = []
 
         lora = {
-            "path": folder_paths.get_full_path("loras", lora),
+            "path": folder_paths.get_full_path(context, "loras", lora),
             "strength": strength,
             "name": lora.split(".")[0],
             "fuse_lora": fuse_lora,
@@ -195,10 +199,10 @@ class FramePackLoraSelect:
 
 class LoadFramePackModel:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(s, context: execution_context.ExecutionContext):
         return {
             "required": {
-                "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
+                "model": (folder_paths.get_filename_list(context, "diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16", "fp16"], {"default": "bf16"}),
             "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2'], {"default": 'disabled', "tooltip": "optional quantization method"}),
@@ -212,6 +216,9 @@ class LoadFramePackModel:
                     ], {"default": "sdpa"}),
                 "compile_args": ("FRAMEPACKCOMPILEARGS", ),
                 "lora": ("FPLORA", {"default": None, "tooltip": "LORA model to load"}),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -221,7 +228,8 @@ class LoadFramePackModel:
     CATEGORY = "FramePackWrapper"
 
     def loadmodel(self, model, base_precision, quantization,
-                  compile_args=None, attention_mode="sdpa", lora=None, load_device="main_device"):
+                  compile_args=None, attention_mode="sdpa", lora=None, load_device="main_device",
+                  context: execution_context.ExecutionContext=None):
 
         base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
 
@@ -232,7 +240,7 @@ class LoadFramePackModel:
         else:
             transformer_load_device = offload_device
 
-        model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
+        model_path = folder_paths.get_full_path_or_raise(context, "diffusion_models", model)
         model_config_path = os.path.join(script_directory, "transformer_config.json")
         import json
         with open(model_config_path, "r") as f:
@@ -392,6 +400,9 @@ class FramePackSampler:
                 "start_embed_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Weighted average constant for image embed interpolation. If end image is not set, the embed's strength won't be affected"}),
                 "initial_samples": ("LATENT", {"tooltip": "init Latents to use for video2video"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -401,7 +412,8 @@ class FramePackSampler:
     CATEGORY = "FramePackWrapper"
 
     def process(self, model, shift, positive, negative, latent_window_size, use_teacache, total_second_length, teacache_rel_l1_thresh, steps, cfg,
-                guidance_scale, seed, sampler, gpu_memory_preservation, start_latent=None, image_embeds=None, end_latent=None, end_image_embeds=None, embed_interpolation="linear", start_embed_strength=1.0, initial_samples=None, denoise_strength=1.0):
+                guidance_scale, seed, sampler, gpu_memory_preservation, start_latent=None, image_embeds=None, end_latent=None, end_image_embeds=None, embed_interpolation="linear", start_embed_strength=1.0, initial_samples=None, denoise_strength=1.0,
+                context: execution_context.ExecutionContext=None):
         total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
         total_latent_sections = int(max(round(total_latent_sections), 1))
         print("total_latent_sections: ", total_latent_sections)
@@ -471,7 +483,7 @@ class FramePackSampler:
 
         patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, torch.device("cpu"))
         from latent_preview import prepare_callback
-        callback = prepare_callback(patcher, steps)
+        callback = prepare_callback(context, patcher, steps)
 
         move_model_to_device_with_memory_preservation(transformer, target_device=device, preserved_memory_gb=gpu_memory_preservation)
 
